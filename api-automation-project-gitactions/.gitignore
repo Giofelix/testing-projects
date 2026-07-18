@@ -1,0 +1,19 @@
+# Dependencias de Node.js
+node_modules/
+npm-debug.log*
+
+# Reportes generados
+reports/
+!reports/.gitkeep  # Mantiene la carpeta pero sin archivos
+
+# Archivos temporales
+*.tmp
+*.log
+
+# Archivos del sistema
+.DS_Store
+Thumbs.db
+
+# Archivos de entorno (sensibles)
+.env
+*.env.local

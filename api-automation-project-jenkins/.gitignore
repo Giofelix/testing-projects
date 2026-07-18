@@ -1,0 +1,22 @@
+# --- Dependencias ---
+node_modules/
+npm-debug.log*
+
+# --- Reportes generados ---
+# Ignoramos todos los reportes, pero mantenemos la carpeta viva
+reports/*
+!reports/.gitkeep
+
+# --- Variables de Entorno (SEGURIDAD) ---
+.env
+.env.local
+
+# --- Archivos de Sistema y Editores ---
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# --- Postman Local ---
+*.postman_dumps.json
+postman_agent.log

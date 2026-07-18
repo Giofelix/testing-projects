@@ -1,0 +1,64 @@
+
+# ===================================================================
+# DEPENDENCIAS
+# ===================================================================
+node_modules/
+
+# ===================================================================
+# ARTEFACTOS GENERADOS (tests, reportes, capturas)
+# ===================================================================
+/test-results/
+/playwright-report/
+/blob-report/
+/allure-results/
+/allure-report/
+/*.png
+/*.jpg
+/*.jpeg
+/*.mp4
+/*.webm
+/*.zip
+
+# ===================================================================
+# ESTADO DE SESIÓN PLAYWRIGHT (se regenera con global-setup)
+# ===================================================================
+/playwright/.cache/
+/playwright/.auth/
+
+# ===================================================================
+# LOGS Y CACHE
+# ===================================================================
+/.playwright-mcp/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+
+# ===================================================================
+# CREDENCIALES (nunca compartir — copiar .env.example y completar)
+# ===================================================================
+.env
+
+# ===================================================================
+# HERRAMIENTAS PERSONALES (cada desarrollador gestiona las suyas)
+# No se comparten: agentes IA, specs, pruebas personales, config Claude
+# Usar tools/restore-personal.ps1 para recuperarlas tras clonar
+# ===================================================================
+
+# Agentes de IA y workflows personales
+.github/
+
+# Documentación y contexto de Claude Code
+CLAUDE.md
+.claude/
+
+# Pruebas de desarrollo personal y humo
+suites/Login/
+suites/seed.spec.ts
+suites/test-1.spec.js
+
+# Planes de prueba personales
+specs/
+
+# Configuración de editor
+.vscode/

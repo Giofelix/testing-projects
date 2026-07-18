@@ -1,0 +1,100 @@
+name: API Automation Tests
+
+on:
+  push:
+    branches: [ main, develop ]
+  pull_request:
+    branches: [ main ]
+  schedule:
+    # Ejecutar diariamente a las 8 AM UTC
+    - cron: '0 13 * * *'
+  workflow_dispatch:  # Permite ejecución manual
+
+jobs:
+  run-api-tests:
+    name: Run API Tests
+    runs-on: ubuntu-latest
+    
+    strategy:
+      matrix:
+        node-version: [18.x, 20.x]
+    
+    steps:
+    - name: 📦 Checkout code
+      uses: actions/checkout@v4
+      
+    - name: 🟢 Setup Node.js ${{ matrix.node-version }}
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ matrix.node-version }}
+        cache: 'npm'
+    
+    - name: 📥 Install dependencies
+      run: |
+        npm ci
+        npm install -g newman
+        npm install -g newman-reporter-htmlextra
+    
+    - name: 🔍 Verify project structure
+      run: |
+        echo "📁 Project Structure:"
+        ls -la
+        echo "📂 Collections:"
+        ls -la collections/
+        echo "📂 Environments:"
+        ls -la environments/
+    
+    - name: 🧪 Run Newman Tests
+      id: run-tests
+      run: |
+        echo "🚀 Starting API tests with Newman..."
+        
+        # Crear directorio para reportes
+        mkdir -p ./reports
+        
+        # Ejecutar pruebas con TU colección
+        npx newman run ./collections/API_Automation_Project_collection.json \
+          -g ./environments/workspace.postman_globals.json \
+          -r cli,htmlextra,junit \
+          --reporter-htmlextra-export ./reports/api-report.html \
+          --reporter-junit-export ./reports/junit-report.xml \
+          --delay-request 1000
+        
+        # Guardar exit code
+        echo "exit_code=$?" >> $GITHUB_OUTPUT
+    
+    - name: 📊 Upload HTML Report
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: api-test-report-${{ matrix.node-version }}
+        path: ./reports/api-report.html
+        retention-days: 30
+    
+    - name: 📄 Upload JUnit Report
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: junit-report-${{ matrix.node-version }}
+        path: ./reports/junit-report.xml
+        retention-days: 30
+    
+    - name: 📧 Notify on Failure
+      if: failure() && steps.run-tests.outputs.exit_code != '0'
+      uses: actions/github-script@v6
+      with:
+        script: |
+          github.rest.issues.create({
+            owner: context.repo.owner,
+            repo: context.repo.repo,
+            title: `❌ API Tests Failed in Run ${context.runNumber}`,
+            body: `Las pruebas API han fallado en la ejecución #${context.runNumber}\n\n**Detalles:**\n- Workflow: ${context.workflow}\n- Commit: ${context.sha}\n- Branch: ${context.ref}\n\nVer logs: ${context.serverUrl}/${context.repo.owner}/${context.repo.repo}/actions/runs/${context.runId}`,
+            labels: ['bug', 'api-tests', 'ci-failure']
+          })
+    
+    - name: 🎉 Notify on Success
+      if: success()
+      run: |
+        echo "✅ All API tests passed!"
+        echo "📊 Reports available in Artifacts section"
+        echo "🔗 Workflow URL: https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}"

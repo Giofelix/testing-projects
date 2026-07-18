@@ -1,0 +1,21 @@
+{
+  "name": "proyecto-automatizacion-hibrida",
+  "version": "1.0.0",
+  "description": "Proyecto de automatización híbrido",
+  "scripts": {
+    "clean": "node -e \"const fs = require('fs'); if (fs.existsSync('reports')) fs.rmSync('reports', { recursive: true, force: true }); fs.mkdirSync('reports/api-report', { recursive: true }); fs.mkdirSync('reports/ui-report', { recursive: true }); console.log('✅ Carpetas de reportes listas');\"",
+    "api:test": "newman run \"api/collections/API_Automation_Project_collection.json\" -g \"api/environments/workspace.postman_globals.json\" -r htmlextra --reporter-htmlextra-export \"reports/api-report/api-report.html\" --disable-unicode --silent",
+    "ui:test": "npx playwright test --output=reports/ui-report",
+    "ui:report": "npx playwright show-report reports/ui-report",
+    "test:all": "npm-run-all clean api:test ui:test"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.49.0",
+    "@types/node": "^22.0.0",
+    "npm-run-all": "^4.1.5"
+  },
+  "dependencies": {
+    "newman": "^6.2.2",
+    "newman-reporter-htmlextra": "^1.23.1"
+  }
+}

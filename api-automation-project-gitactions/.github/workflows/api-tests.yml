@@ -1,0 +1,72 @@
+name: API Automation Tests
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  schedule:
+    # Ejecuta automáticamente cada día a las 8 AM UTC
+    - cron: '0 13 * * *'
+  workflow_dispatch: # Permite ejecución manual
+
+jobs:
+  run-api-tests:
+    runs-on: ubuntu-latest
+    
+    strategy:
+      matrix:
+        node-version: [20.x]
+    
+    steps:
+    - name: 📦 Checkout repository
+      uses: actions/checkout@v4
+      
+    - name: 🟢 Setup Node.js ${{ matrix.node-version }}
+      uses: actions/setup-node@v4
+      with:
+        node-version: ${{ matrix.node-version }}
+        cache: 'npm'
+    
+    - name: 📥 Install dependencies
+      run: npm ci
+      
+    - name: 🔍 Install Newman reporters
+      run: |
+        npm install -g newman
+        npm install -g newman-reporter-htmlextra
+        npm install newman-reporter-htmlextra --save-dev
+    
+    - name: 🧪 Run API Tests with Newman
+      id: run-tests
+      run: |
+        echo "Starting API tests..."
+        
+        # Crear directorio para reportes
+        mkdir -p ./reports
+        
+        # Ejecutar pruebas
+        npx newman run ./collections/UserManagement.postman_collection.json \
+          -g ./environments/ReqRes_Practice.postman_environment.json \
+          -r cli,htmlextra,junit \
+          --reporter-htmlextra-export ./reports/api-report.html \
+          --reporter-junit-export ./reports/junit-report.xml \
+          --delay-request 500
+        
+        # Guardar código de salida
+        TEST_EXIT_CODE=$?
+        echo "exit_code=$TEST_EXIT_CODE" >> $GITHUB_OUTPUT
+    
+    - name: 📊 Upload HTML report
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: api-test-report
+        path: ./reports/api-report.html
+        
+    - name: 📄 Upload JUnit report
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: junit-test-report
+        path: ./reports/junit-report.xml

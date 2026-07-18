@@ -1,0 +1,21 @@
+{
+	"id": "c7c77478-90ce-470a-8d9e-904de9e96b30",
+	"values": [
+		{
+			"key": "Id_registro",
+			"value": "",
+			"type": "any",
+			"enabled": true
+		},
+		{
+			"key": "mi_token_global",
+			"value": "",
+			"type": "any",
+			"enabled": true
+		}
+	],
+	"name": "Globals",
+	"_postman_variable_scope": "globals",
+	"_postman_exported_at": "2026-01-18T17:18:05.234Z",
+	"_postman_exported_using": "Postman/11.80.1"
+}

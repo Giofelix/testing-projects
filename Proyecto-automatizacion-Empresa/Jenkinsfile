@@ -1,0 +1,809 @@
+// ═══════════════════════════════════════════════════════════════════════════
+// COMPORTAMIENTO POR RAMA
+//   integration → Modo Libre: manual (formulario) + detección de cambios por push.
+//                 También permite probar Modo Despliegue manualmente (testing).
+//   master      → SOLO Modo Despliegue. Sin ENTITIES+PROJECT_NAME el build
+//                 se marca NOT_BUILT (no corre nada, ni "toda la suite").
+// ═══════════════════════════════════════════════════════════════════════════
+
+pipeline {
+    agent { label 'automatico_196' }
+
+    tools {
+        nodejs 'node20'
+    }
+
+    parameters {
+        // ─── Modo Libre (solo tiene efecto en integration) ───
+        choice(
+            name: 'TEST_SUITE',
+            choices: ['auto', 'smoke', 'regression', 'all'],
+            description: '[MODO LIBRE - integration] Suite a correr. "auto" decide según la rama.'
+        )
+        string(
+            name: 'MODULE',
+            defaultValue: '',
+            description: '[MODO LIBRE - integration] Módulo específico (ej: login). Vacío = todos.'
+        )
+        string(
+            name: 'EXTRA_GREP',
+            defaultValue: '',
+            description: 'Patrón --grep adicional. Vacío si no aplica.'
+        )
+        string(
+            name: 'APP_BASE_URL',
+            defaultValue: 'http://172.17.1.214:9080/pasto/',
+            description: '[MODO LIBRE - integration] URL base. En Modo Despliegue se reconstruye automáticamente por entidad.'
+        )
+        booleanParam(
+            name: 'FORCE_FULL_SUITE',
+            defaultValue: false,
+            description: 'Forzar ejecución completa ignorando detección de cambios. SOLO aplica en integration; no tiene efecto en master.'
+        )
+
+        // ─── Modo Despliegue (única vía válida en master; también testeable en integration) ───
+        string(
+            name: 'ENTITIES',
+            defaultValue: '',
+            description: '[MODO DESPLIEGUE] Entidades desplegadas, separadas por coma. Ej: pasto,cajica,honda'
+        )
+        string(
+            name: 'PROJECT_NAME',
+            defaultValue: '',
+            description: '[MODO DESPLIEGUE] Microservicios desplegados, separados por coma. Ej: SYSMAN_PREDIAL,SYSMAN_TESORERIA'
+        )
+        string(
+            name: 'VERSION',
+            defaultValue: '',
+            description: '[MODO DESPLIEGUE] Versión release (informativo). Ej: RC.0.5.7'
+        )
+        choice(
+            name: 'TEST_TYPE',
+            choices: ['e2e','smoke', 'regression', 'critical', 'all'],
+            description: '[MODO DESPLIEGUE] Tipo de prueba a correr.'
+        )
+        choice(
+            name: 'EXECUTION_MODE',
+            choices: ['per_entity', 'all_entities_together'],
+            description: '[MODO DESPLIEGUE] Una corrida por entidad o todas juntas.'
+        )
+    }
+
+    options {
+        timeout(time: 90, unit: 'MINUTES')   // Ceiling subido para soportar múltiples entidades en master; no afecta tiempos reales de integration
+        //ansiColor('xterm')
+        buildDiscarder(logRotator(numToKeepStr: '20', artifactNumToKeepStr: '10'))
+        timestamps()
+        skipDefaultCheckout(true)
+    }
+
+    environment {
+        CI = 'true'
+        PLAYWRIGHT_BROWSERS_PATH = '/home/ubuntu/.cache/playwright-browsers'
+        BASE_URL = "${params.APP_BASE_URL}"   // Default para Modo Libre; Modo Despliegue lo sobreescribe por entidad dentro del sh
+    }
+
+    stages {
+
+        stage('Limpiar Workspace') {
+            steps {
+                cleanWs()
+            }
+        }
+
+        stage('Checkout SCM') {
+            steps {
+                checkout scm
+            }
+        }
+
+        stage('🔍 Información del Build') {
+            steps {
+                script {
+                    def causes = currentBuild.getBuildCauses()
+                    env.IS_MANUAL_BUILD = causes.any { it._class?.contains('UserIdCause') } ? 'true' : 'false'
+                    env.IS_MASTER = (env.BRANCH_NAME == 'master') ? 'true' : 'false'
+
+                    def hasDeploymentParams = params.PROJECT_NAME?.trim() && params.ENTITIES?.trim()
+                    env.PIPELINE_MODE = hasDeploymentParams ? 'DEPLOYMENT' : 'FREE'
+
+                    // 🆕 Nombre descriptivo del build en Modo Despliegue
+                    if (env.PIPELINE_MODE == 'DEPLOYMENT') {
+                        def version      = params.VERSION?.trim()      ?: 'sin-version'
+                        def proyecto     = params.PROJECT_NAME?.trim() ?: 'sin-proyecto'
+                        def entidad      = params.ENTITIES?.trim()     ?: 'sin-entidad'
+                        def entidadLabel = entidad.replace(',', '+')
+                        currentBuild.displayName = "${version} | ${proyecto} | ${entidadLabel}"
+                        currentBuild.description = "E2E post-despliegue — ${entidad}"
+                    }
+
+                    echo '═══════════════════════════════════════════════════════════════'
+                    echo '  INFORMACIÓN DEL BUILD'
+                    echo '═══════════════════════════════════════════════════════════════'
+                    echo "  📌 Build número:     #${env.BUILD_NUMBER}"
+                    echo "  🏷  Nombre build:     ${currentBuild.displayName}"
+                    echo "  🌿 Rama:             ${env.BRANCH_NAME ?: 'desconocida'}"
+                    echo "  🎯 Tipo:             ${env.IS_MANUAL_BUILD == 'true' ? '👤 MANUAL' : '🤖 AUTOMÁTICO (push)'}"
+                    echo "  🚦 Modo Pipeline:    ${env.PIPELINE_MODE == 'DEPLOYMENT' ? '🚀 DESPLIEGUE DIRIGIDO' : '🔧 MODO LIBRE'}"
+                    echo "  👤 Lanzado por:      ${causes[0]?.shortDescription ?: 'automático'}"
+                    echo "  🕐 Hora inicio:      ${new Date().format('yyyy-MM-dd HH:mm:ss')}"
+                    echo '───────────────────────────────────────────────────────────────'
+                    if (env.PIPELINE_MODE == 'DEPLOYMENT') {
+                        echo "  📦 PROJECT_NAME:     ${params.PROJECT_NAME}"
+                        echo "  🏢 ENTITIES:         ${params.ENTITIES}"
+                        echo "  🏷  VERSION:          ${params.VERSION ?: '(no especificada)'}"
+                        echo "  🧪 TEST_TYPE:        ${params.TEST_TYPE}"
+                        echo "  🔁 EXECUTION_MODE:   ${params.EXECUTION_MODE}"
+                    } else {
+                        echo "  🧪 Suite:            ${params.TEST_SUITE}"
+                        echo "  📦 Módulo:           ${params.MODULE ?: '(todos)'}"
+                        echo "  🔎 Grep extra:       ${params.EXTRA_GREP ?: '(ninguno)'}"
+                        echo "  🌍 Forzar todo:      ${params.FORCE_FULL_SUITE}"
+                    }
+                    echo '───────────────────────────────────────────────────────────────'
+                    echo "  🌐 URL aplicación:   ${env.BASE_URL}"
+                    echo "  💾 Cache browsers:   ${env.PLAYWRIGHT_BROWSERS_PATH}"
+                    echo "  📂 Workspace:        ${env.WORKSPACE}"
+                    echo '═══════════════════════════════════════════════════════════════'
+                }
+            }
+        }
+
+        // ───────────────────────────────────────────────────────────────────
+        // 🆕 GUARD DE RAMA: master SOLO puede correr en Modo Despliegue.
+        // Si no hay ENTITIES+PROJECT_NAME, el build se detiene aquí (NOT_BUILT)
+        // y ningún stage posterior se ejecuta.
+        // ───────────────────────────────────────────────────────────────────
+        stage('🔒 Control de Rama') {
+            steps {
+                script {
+                    if (env.IS_MASTER == 'true' && env.PIPELINE_MODE == 'FREE') {
+                        echo '⛔ La rama master únicamente ejecuta pruebas en Modo Despliegue.'
+                        echo '   Debes especificar ENTITIES y PROJECT_NAME al lanzar el build'
+                        echo '   (a futuro estos los proveerá el orquestador de despliegues).'
+                        currentBuild.result = 'NOT_BUILT'
+                        currentBuild.description = '⏭ master: faltan ENTITIES/PROJECT_NAME'
+                    }
+                }
+            }
+        }
+
+        // ─── Validación de parámetros (solo Modo Despliegue) ───
+        stage('✅ Validación Modo Despliegue') {
+            when {
+                allOf {
+                    expression { currentBuild.result != 'NOT_BUILT' }
+                    expression { env.PIPELINE_MODE == 'DEPLOYMENT' }
+                }
+            }
+            steps {
+                script {
+                    def validation = validateDeploymentParams()
+                    if (!validation.valid) {
+                        error "❌ Validación fallida:\n  • ${validation.errors.join('\n  • ')}"
+                    }
+                    env.RESOLVED_MODULE_TAGS = validation.moduleTags.join(',')
+                    env.RESOLVED_ENTITIES = validation.entities.join(',')
+
+                    echo "✅ PROJECT_NAME válidos → tags: ${validation.moduleTags.collect{'@'+it}.join(', ')}"
+                    echo "✅ ENTITIES validadas: ${env.RESOLVED_ENTITIES}"
+                }
+            }
+        }
+
+        // ─── Detección de cambios (solo Modo Libre; nunca corre en master) ───
+        stage('🧐 Detección de Cambios') {
+            when {
+                allOf {
+                    expression { currentBuild.result != 'NOT_BUILT' }
+                    expression { env.PIPELINE_MODE == 'FREE' }
+                    expression { env.IS_MANUAL_BUILD == 'false' }
+                    expression { !params.FORCE_FULL_SUITE }
+                }
+            }
+            steps {
+                script {
+                    def commitMsg = sh(returnStdout: true, script: 'git log -1 --pretty=%B').trim()
+                    if (commitMsg.toLowerCase().contains('[ci skip]') ||
+                        commitMsg.toLowerCase().contains('[skip ci]')) {
+                        echo '⏭  Detectado [ci skip] en mensaje del commit. Saltando build.'
+                        currentBuild.result = 'NOT_BUILT'
+                        currentBuild.description = '⏭ [ci skip] en commit'
+                        return
+                    }
+
+                    def decision = analyzeChanges()
+                    env.CHANGE_DECISION = decision.action
+                    env.CHANGE_TARGET   = decision.target ?: ''
+
+                    echo '───────────────────────────────────────────────────────────────'
+                    echo "  📋 Archivos cambiados: ${decision.fileCount}"
+                    echo "  🎬 Acción decidida:    ${decision.action}"
+                    if (decision.target) echo "  🎯 Target:             ${decision.target}"
+                    if (decision.reason) echo "  💡 Razón:              ${decision.reason}"
+                    echo '───────────────────────────────────────────────────────────────'
+
+                    if (decision.action == 'SKIP') {
+                        echo '⏭  Solo se modificaron archivos no relacionados con pruebas.'
+                        echo '   El build se marca como NOT_BUILT y termina aquí.'
+                        currentBuild.result = 'NOT_BUILT'
+                        currentBuild.description = "⏭ ${decision.reason}"
+                    }
+                }
+            }
+        }
+
+        stage('📦 Instalación de Dependencias') {
+            when {
+                expression { currentBuild.result != 'NOT_BUILT' }
+            }
+            steps {
+                script {
+                    echo '▶ Verificando versiones de Node y npm...'
+                }
+                sh 'node --version && npm --version'
+                script {
+                    echo '▶ Ejecutando npm ci (instalación reproducible desde package-lock.json)...'
+                }
+                sh 'npm ci'
+                script {
+                    echo '✅ Dependencias instaladas correctamente'
+                }
+            }
+            post {
+                failure {
+                    echo '❌ FALLO: No se pudieron instalar las dependencias'
+                    echo '   Posibles causas:'
+                    echo '   • package-lock.json desactualizado o corrupto'
+                    echo '   • Sin acceso a registry.npmjs.org'
+                    echo '   • Versión de Node incompatible'
+                }
+            }
+        }
+
+        stage('🌐 Preparación de Navegadores') {
+            when {
+                expression { currentBuild.result != 'NOT_BUILT' }
+            }
+            steps {
+                script {
+                    echo '▶ Verificando cache de navegadores Playwright...'
+                }
+                sh '''
+                    if [ ! -d "$PLAYWRIGHT_BROWSERS_PATH" ]; then
+                        echo "Creando directorio de cache: $PLAYWRIGHT_BROWSERS_PATH"
+                        mkdir -p "$PLAYWRIGHT_BROWSERS_PATH"
+                    else
+                        echo "Cache existente encontrado en: $PLAYWRIGHT_BROWSERS_PATH"
+                    fi
+                    npx playwright install chromium
+                '''
+                script {
+                    echo '✅ Navegadores listos'
+                }
+            }
+            post {
+                failure {
+                    echo '❌ FALLO: No se pudieron preparar los navegadores'
+                    echo '   Verifica acceso a cdn.playwright.dev'
+                    echo '   Verifica permisos en el directorio de cache'
+                }
+            }
+        }
+
+        // ─── 🆕 Ejecución Modo Despliegue (master, o integration para testing) ───
+        stage('🚀 Ejecución Modo Despliegue') {
+            when {
+                allOf {
+                    expression { currentBuild.result != 'NOT_BUILT' }
+                    expression { env.PIPELINE_MODE == 'DEPLOYMENT' }
+                }
+            }
+            steps {
+                script {
+                    def entidades = env.RESOLVED_ENTITIES.split(',') as List
+                    def moduleTags = env.RESOLVED_MODULE_TAGS.split(',') as List
+
+                    sh '''
+                        if [ -d allure-results ]; then rm -rf allure-results; fi
+                        if [ -d playwright-report ]; then rm -rf playwright-report; fi
+                        mkdir -p allure-results
+                    '''
+
+                    if (params.EXECUTION_MODE == 'all_entities_together') {
+                        echo '🔁 Modo: TODAS LAS ENTIDADES JUNTAS'
+                        runDeploymentTestsForEntity(moduleTags, entidades, params.TEST_TYPE, 'combined')
+                    } else {
+                        echo "🔁 Modo: UNA POR UNA (${entidades.size()} entidades)"
+                        def fallosPorEntidad = [:]
+                        entidades.eachWithIndex { entidad, idx ->
+                            echo ''
+                            echo '═══════════════════════════════════════════════════════════════'
+                            echo "  🏢 [${idx + 1}/${entidades.size()}] Entidad: ${entidad}"
+                            echo '═══════════════════════════════════════════════════════════════'
+                            try {
+                                runDeploymentTestsForEntity(moduleTags, [entidad], params.TEST_TYPE, entidad)
+                                echo "✅ ${entidad}: OK"
+                            } catch (Exception e) {
+                                fallosPorEntidad[entidad] = e.message
+                                echo "❌ ${entidad}: FALLÓ — ${e.message.take(200)}"
+                            }
+                        }
+
+                        if (fallosPorEntidad) {
+                            echo ''
+                            echo '═══════════════════════════════════════════════════════════════'
+                            echo "  ❌ RESUMEN DE FALLOS (${fallosPorEntidad.size()}/${entidades.size()})"
+                            echo '═══════════════════════════════════════════════════════════════'
+                            fallosPorEntidad.each { ent, msg -> echo "  • ${ent}: ${msg.take(150)}" }
+                            error "Hubo fallos en ${fallosPorEntidad.size()} entidades: ${fallosPorEntidad.keySet().join(', ')}"
+                        }
+                    }
+                }
+            }
+        }
+
+        // ─── Resolución de Filtros (Modo Libre — sin cambios respecto a hoy) ───
+        stage('🎯 Resolución de Filtros') {
+            when {
+                allOf {
+                    expression { currentBuild.result != 'NOT_BUILT' }
+                    expression { env.PIPELINE_MODE == 'FREE' }
+                }
+            }
+            steps {
+                script {
+                    echo '▶ Construyendo patrón --grep según parámetros y rama...'
+
+                    if (env.IS_MANUAL_BUILD == 'true' || params.FORCE_FULL_SUITE) {
+                        echo '▶ Modo: Usando parámetros del formulario'
+                        echo '  (build manual o FORCE_FULL_SUITE activo)'
+
+                        def branch = env.BRANCH_NAME ?: 'master'
+                        def suite  = params.TEST_SUITE
+
+                        if (suite == 'auto') {
+                            suite = (branch == 'integration') ? 'all' : 'all'
+                            echo "  ↳ Modo 'auto' detectado. Rama '${branch}' → suite '${suite}'"
+                        }
+
+                        def patterns = []
+                        if (suite == 'smoke') {
+                            patterns << '@smoke'
+                            echo "  ↳ Filtro smoke: @smoke"
+                        }
+                        if (suite == 'regression') {
+                            patterns << '@regression|@smoke|@critical'
+                            echo "  ↳ Filtro regression: @regression|@smoke|@critical"
+                        }
+                        if (params.MODULE?.trim()) {
+                            patterns << "@${params.MODULE.trim()}"
+                            echo "  ↳ Filtro módulo: @${params.MODULE.trim()}"
+                        }
+                        if (params.EXTRA_GREP?.trim()) {
+                            patterns << params.EXTRA_GREP.trim()
+                            echo "  ↳ Filtro extra: ${params.EXTRA_GREP.trim()}"
+                        }
+
+                        env.GREP_PATTERN = patterns ? patterns.collect { "(?=.*${it})" }.join('') : ''
+                        env.SPEC_PATHS = ''
+
+                        if (env.GREP_PATTERN?.trim()) {
+                            echo "✅ Patrón --grep final: ${env.GREP_PATTERN}"
+                        } else {
+                            echo '✅ Sin filtros → se ejecutarán TODAS las pruebas'
+                        }
+                    } else {
+                        echo '▶ Modo: Automático basado en archivos cambiados'
+
+                        env.GREP_PATTERN = ''
+                        if (env.CHANGE_DECISION == 'RUN_TARGET') {
+                            env.SPEC_PATHS = env.CHANGE_TARGET
+                            echo "🎯 Se ejecutarán específicamente: ${env.SPEC_PATHS}"
+                        } else {
+                            env.SPEC_PATHS = ''
+                            echo "🌍 Se ejecutará la SUITE COMPLETA"
+                        }
+                    }
+                }
+            }
+        }
+
+        // ─── Ejecución (Modo Libre — sin cambios respecto a hoy) ───
+        stage('🚀 Ejecución de Pruebas') {
+            when {
+                allOf {
+                    expression { currentBuild.result != 'NOT_BUILT' }
+                    expression { env.PIPELINE_MODE == 'FREE' }
+                }
+            }
+            steps {
+                withCredentials([
+                    string(credentialsId: 'USER_GENERIC', variable: 'USER_GENERIC'),
+                    string(credentialsId: 'PASSWORD_UNIVERSAL', variable: 'PASSWORD_UNIVERSAL')
+                ]) {
+                    script {
+                        echo '▶ Limpiando resultados de builds anteriores...'
+                    }
+                    sh '''
+                        if [ -d allure-results ]; then
+                            echo "Borrando allure-results anterior..."
+                            rm -rf allure-results
+                        fi
+                        if [ -d playwright-report ]; then
+                            echo "Borrando playwright-report anterior..."
+                            rm -rf playwright-report
+                        fi
+                    '''
+                    script {
+                        env.LANG = 'es_ES.UTF-8'
+                        env.LANGUAGE = 'es_ES:es'
+                        env.LC_ALL = 'es_ES.UTF-8'
+
+                        echo '▶ Iniciando Playwright...'
+                        echo '  (incluye globalSetup: login inicial + ejecución de tests)'
+                        echo ''
+
+                        def cmdParts = ['npx playwright test']
+                        if (env.SPEC_PATHS?.trim()) {
+                            cmdParts << env.SPEC_PATHS
+                        }
+                        if (env.GREP_PATTERN?.trim()) {
+                            cmdParts << "--grep '${env.GREP_PATTERN}'"
+                        }
+
+                        def cmd = cmdParts.join(' ')
+                        echo "🔎 Comando: ${cmd}"
+
+                        sh "LANG=es_ES.UTF-8 LANGUAGE=es_ES:es LC_ALL=es_ES.UTF-8 ${cmd}"
+
+                        echo ''
+                        echo '✅ Todas las pruebas pasaron exitosamente'
+                    }
+                }
+            }
+            post {
+                failure {
+                    echo ''
+                    echo '═══════════════════════════════════════════════════════════════'
+                    echo '  ❌ FALLO EN EJECUCIÓN DE PRUEBAS'
+                    echo '═══════════════════════════════════════════════════════════════'
+                    echo '  Diagnóstico sugerido:'
+                    echo '  1. Revisa el reporte Allure (botón izquierdo del build)'
+                    echo '  2. Descarga test-results.zip para ver traces/videos/screenshots'
+                    echo '  3. Si falló en globalSetup: revisa conectividad y disponibilidad'
+                    echo '     de la app, y si el usuario admin no está bloqueado'
+                    echo '  4. Si falló en algún test: revisa el trace en:'
+                    echo '     test-results/[nombre-test]/trace.zip'
+                    echo '═══════════════════════════════════════════════════════════════'
+                }
+            }
+        }
+    }
+
+    post {
+        always {
+            script {
+                if (currentBuild.result != 'NOT_BUILT') {
+                    echo ''
+                    echo '═══════════════════════════════════════════════════════════════'
+                    echo '  📊 GENERANDO REPORTE ALLURE'
+                    echo '═══════════════════════════════════════════════════════════════'
+                }
+            }
+            allure([
+                includeProperties: false,
+                jdk: '',
+                results: [[path: 'allure-results']]
+            ])
+            archiveArtifacts artifacts: 'playwright-report/**', allowEmptyArchive: true, fingerprint: false
+            archiveArtifacts artifacts: 'test-results/**',      allowEmptyArchive: true, fingerprint: false
+            script {
+                def duration = currentBuild.durationString.replace(' and counting', '')
+                echo ''
+                echo '═══════════════════════════════════════════════════════════════'
+                echo "  ⏱  Duración total del build: ${duration}"
+                echo '═══════════════════════════════════════════════════════════════'
+            }
+        }
+        success {
+            script {
+                if (currentBuild.result == 'NOT_BUILT') {
+                    echo ''
+                    echo '⏭  ═══════════════════════════════════════════════════════════════'
+                    echo "  BUILD #${env.BUILD_NUMBER} - SIN EJECUCIÓN DE PRUEBAS"
+                    echo '⏭  ═══════════════════════════════════════════════════════════════'
+                    echo "  ${currentBuild.description ?: 'No se requirieron pruebas para este cambio'}"
+                } else {
+                    echo ''
+                    echo '✅ ═══════════════════════════════════════════════════════════════'
+                    echo "  🎉 BUILD #${env.BUILD_NUMBER} EXITOSO"
+                    echo '✅ ═══════════════════════════════════════════════════════════════'
+                    echo '   Reporte Allure disponible en el menú izquierdo del build'
+                }
+            }
+        }
+        failure {
+            script {
+                echo ''
+                echo '❌ ═══════════════════════════════════════════════════════════════'
+                echo "  💥 BUILD #${env.BUILD_NUMBER} FALLÓ"
+                echo '❌ ═══════════════════════════════════════════════════════════════'
+                echo '   📋 Pasos para diagnosticar:'
+                echo '   1. Revisa el reporte Allure (menú izquierdo)'
+                echo '   2. Descarga test-results.zip para ver:'
+                echo '      • Screenshots del momento del fallo'
+                echo '      • Videos de la sesión'
+                echo '      • Traces (npx playwright show-trace trace.zip)'
+                echo '   3. Revisa logs de stages anteriores en este mismo build'
+            }
+        }
+        unstable {
+            script {
+                echo ''
+                echo '⚠  BUILD INESTABLE - algunas pruebas fallaron pero el pipeline completó'
+            }
+        }
+    }
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// FUNCIONES AUXILIARES — DETECCIÓN DE CAMBIOS (Modo Libre, sin cambios)
+// ═══════════════════════════════════════════════════════════════════════════
+
+def getModuleMap() {
+    return [
+        'reteica' : 'suites/Reteica',
+        'Reteica' : 'suites/Reteica',
+        'login'   : 'suites/Login',
+        'Login'   : 'suites/Login',
+        // 'predial'  : 'suites/Predial',
+        // 'Predial'  : 'suites/Predial',
+    ]
+}
+
+def analyzeChanges() {
+    def MODULE_MAP = getModuleMap()
+
+    def IGNORED = [
+        ~/^Jenkinsfile$/,
+        ~/^Jenkinsfile\..*$/,
+        ~/^playwright\.config\.js$/,
+        ~/^\.gitignore$/,
+        ~/^\.env\.example$/,
+        ~/^.*\.md$/,
+        ~/^specs\/.*/,
+        ~/^docs\/.*/,
+    ]
+
+    def GLOBAL = [
+        ~/^playwright\/.*/,
+        ~/^pages\/login\/.*/,
+        ~/^pages\/common\/.*/,
+        ~/^fixtures\/index\.js$/,
+        ~/^fixtures\/auth\.fixture\.js$/,
+        ~/^suites\/config-ambientes\/.*/,
+        ~/^package\.json$/,
+        ~/^package-lock\.json$/,
+    ]
+
+    def previousCommit = env.GIT_PREVIOUS_SUCCESSFUL_COMMIT ?: env.GIT_PREVIOUS_COMMIT ?: 'HEAD~1'
+    def gitOutput = ''
+    try {
+        gitOutput = sh(
+            returnStdout: true,
+            script: "git diff --name-only ${previousCommit} HEAD 2>/dev/null || git diff --name-only HEAD~1 HEAD"
+        ).trim()
+    } catch (Exception e) {
+        echo "⚠ No se pudo obtener diff (${e.message}). Por seguridad → RUN_ALL"
+        return [action: 'RUN_ALL', fileCount: 0, reason: 'No se pudo obtener diff de git']
+    }
+
+    def files = gitOutput.split('\n').findAll { it?.trim() }
+
+    if (files.isEmpty()) {
+        return [action: 'RUN_ALL', fileCount: 0, reason: 'No se detectaron archivos cambiados']
+    }
+
+    echo "Archivos modificados detectados:"
+    files.each { echo "  • ${it}" }
+
+    def globalHits  = []
+    def ignoredHits = []
+    def moduleHits  = [:] as Map
+    def specHits    = [] as Set
+
+    files.each { file ->
+        if (GLOBAL.any { file ==~ it }) { globalHits << file; return }
+        if (IGNORED.any { file ==~ it }) { ignoredHits << file; return }
+        def specMatch = file =~ /^suites\/([^\/]+)\/(.+\.spec\.js)$/
+        if (specMatch) { specHits << file; return }
+        def pageMatch = file =~ /^pages\/modulos\/([^\/]+)\//
+        def fixMatch  = file =~ /^fixtures\/([^\/]+)\//
+        def suitMatch = file =~ /^suites\/([^\/]+)\//
+        def moduleName = null
+        if (pageMatch) moduleName = pageMatch[0][1]
+        else if (fixMatch) moduleName = fixMatch[0][1]
+        else if (suitMatch) moduleName = suitMatch[0][1]
+        if (moduleName) {
+            def suiteFolder = MODULE_MAP[moduleName]
+            if (suiteFolder) {
+                if (!moduleHits[suiteFolder]) moduleHits[suiteFolder] = []
+                moduleHits[suiteFolder] << file
+            } else {
+                echo "⚠ Módulo '${moduleName}' no está en MODULE_MAP. Por seguridad → suite completa."
+                globalHits << file
+            }
+        } else {
+            echo "⚠ Archivo '${file}' no clasificado. Por seguridad → suite completa."
+            globalHits << file
+        }
+    }
+
+    if (globalHits) {
+        return [action: 'RUN_ALL', fileCount: files.size(),
+                reason: "Cambios en archivos globales (${globalHits.size()} archivos)"]
+    }
+    if (!moduleHits && !specHits && ignoredHits) {
+        def ignoredNames = ignoredHits.collect { it.tokenize('/').last() }
+        return [action: 'SKIP', fileCount: files.size(),
+                reason: "Solo cambios en archivos ignorados: ${ignoredNames.join(', ')}"]
+    }
+    def targets = [] as Set
+    specHits.each { targets << it }
+    moduleHits.each { folder, _ -> targets << folder }
+    if (!targets) return [action: 'RUN_ALL', fileCount: files.size(), reason: 'Sin clasificación clara']
+    return [action: 'RUN_TARGET', target: targets.join(' '), fileCount: files.size(),
+            reason: "Tests focalizados según cambios detectados"]
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+// FUNCIONES AUXILIARES — MODO DESPLIEGUE
+// ═══════════════════════════════════════════════════════════════════════════
+
+def getMicroservicioToTagMap() {
+    return [
+        'SYSMAN_PREDIAL'                    : 'sysman-predial',
+        'SYSMAN_ADMINISTRACION_SISTEMA'     : 'sysman-administracion-sistema',
+        'SYSMAN_ADMINISTRACION'             : 'administracion',
+        'MEERKAT_ERP_MENSAJERIA'            : 'mensajeria',
+        'MEERKAT_ERP_AUTENTICACION_LDAP'    : 'autenticacion',
+        'SYSMAN_EXOGENAS'                   : 'exogenas',
+        'SYSMAN_FINANCIABLES'               : 'financiables',
+        'SYSMAN_IMPUESTOS_DECLARADOS'       : 'impuestos_declarados',
+        'MODELADOR_DE_PLANTILLAS'           : 'modelador_plantillas',
+        'SYSMAN_PLANO_MOROROS'              : 'plano_morosos',
+        'MEERKAT_PROJECT'                   : 'reporte',
+        'SYSMAN_REPORTEADOR'                : 'reporteador',
+        'SYSMAN_TESORERIA'                  : 'tesoreria',
+        'SYSMAN_TRANSITO_RODAMIENTO'        : 'transito_rodamiento',
+        'SYSMAN_WORK_PRO'                   : 'workpro',
+        'SYSMAN_FACTURACION_GENERAL'        : 'facturacion_general',
+        'SYSMAN_TOL'                        : 'tol',
+        'TOL_INDUSTYCOM_FUN_FACTURACIONWEB' : 'facturacion_web',
+    ]
+}
+
+def getEntidadesValidas() {
+    return [
+        'cajica', 'sogamoso', 'honda', 'melgar', 'florencia',
+        'sanmartin', 'corpoboyaca', 'gobnarino', 'pasto', 'demo',
+        'duitama', 'trinidad', 'alc_vleyva', 'alc_cubara', 'alc_buenavista'
+    ]
+}
+
+/**
+ * URL base por entidad. Patrón confirmado: http://172.17.1.214:9080/{entidad}/
+ */
+def buildEntityUrl(String entidad) {
+    return "http://172.17.1.214:9080/${entidad}/"
+}
+
+/**
+ * Resuelve qué credenciales usar para una entidad, con fallback seguro.
+ * El chequeo de existencia está AISLADO (sh 'true' trivial) de la ejecución
+ * real de tests, para que un fallo de prueba nunca se confunda con
+ * "credencial no encontrada".
+ */
+def resolveCredentialIds(String entidad) {
+    def entidadUpper = entidad.toUpperCase()
+    def specificUser = "${entidadUpper}_USER"
+    def specificPass = "${entidadUpper}_PASS"
+
+    try {
+        withCredentials([
+            string(credentialsId: specificUser, variable: 'CHK_USER'),
+            string(credentialsId: specificPass, variable: 'CHK_PASS')
+        ]) {
+            sh 'true'  // no-op, solo fuerza la resolución de la credencial
+        }
+        echo "  🔑 Usando credenciales específicas: ${specificUser}/${specificPass}"
+        return [userCredId: specificUser, passCredId: specificPass, source: 'entidad']
+    } catch (Exception e) {
+        echo "  🔑 Sin credenciales específicas (${specificUser}). Usando USER_GENERIC/PASSWORD_UNIVERSAL"
+        return [userCredId: 'USER_GENERIC', passCredId: 'PASSWORD_UNIVERSAL', source: 'generic']
+    }
+}
+
+def validateDeploymentParams() {
+    def map = getMicroservicioToTagMap()
+    def validEntities = getEntidadesValidas()
+    def errors = []
+
+    def microservicios = params.PROJECT_NAME.split(',').collect { it.trim() }.findAll { it }
+    def entidades      = params.ENTITIES.split(',').collect { it.trim().toLowerCase() }.findAll { it }
+
+    def moduleTags = []
+    microservicios.each { ms ->
+        def tag = map[ms]
+        if (!tag) {
+            errors << "PROJECT_NAME desconocido: '${ms}'. Revisar getMicroservicioToTagMap()."
+        } else {
+            moduleTags << tag
+        }
+    }
+
+    entidades.each { ent ->
+        if (!validEntities.contains(ent)) {
+            errors << "ENTITY desconocida: '${ent}'. Revisar getEntidadesValidas()."
+        }
+    }
+
+    if (moduleTags.isEmpty()) errors << "No se resolvió ningún PROJECT_NAME válido"
+    if (entidades.isEmpty())  errors << "No se especificó ninguna ENTITY"
+
+    return [
+        valid: errors.isEmpty(),
+        errors: errors,
+        moduleTags: moduleTags.unique(),
+        entities: entidades.unique()
+    ]
+}
+
+/**
+ * Ejecuta tests para una entidad (o varias en modo combinado).
+ */
+def runDeploymentTestsForEntity(List moduleTags, List entidades, String testType, String label) {
+    def moduleAlt = moduleTags.collect { "@${it}" }.join('|')
+    def entidadAlt = entidades.collect { "@${it}" }.join('|') + '|@todas_entidades'
+
+    def lookaheads = [
+        "(?=.*(${moduleAlt}))",
+        "(?=.*(${entidadAlt}))"
+    ]
+
+    if (testType == 'e2e')        lookaheads << '(?=.*@e2e)' 
+    if (testType == 'smoke')      lookaheads << '(?=.*@smoke)'
+    if (testType == 'regression') lookaheads << '(?=.*(@regression|@smoke|@critical))'
+    if (testType == 'critical')   lookaheads << '(?=.*@critical)'
+
+    def grepPattern = lookaheads.join('')
+
+    def baseUrl = entidades.size() == 1 ? buildEntityUrl(entidades[0]) : env.BASE_URL
+    def creds = entidades.size() == 1
+        ? resolveCredentialIds(entidades[0])
+        : [userCredId: 'USER_GENERIC', passCredId: 'PASSWORD_UNIVERSAL', source: 'generic-combined']
+
+    echo "  🔎 Grep:      ${grepPattern}"
+    echo "  🌐 BASE_URL:  ${baseUrl}"
+    echo "  🔑 Creds:     ${creds.userCredId}/${creds.passCredId} (origen: ${creds.source})"
+
+    def allureDir = "allure-results-${label}"
+
+    withCredentials([
+        string(credentialsId: creds.userCredId, variable: 'USER_GENERIC'),
+        string(credentialsId: creds.passCredId, variable: 'PASSWORD_UNIVERSAL')
+    ]) {
+        sh """
+            export BASE_URL='${baseUrl}'
+            if [ -d ${allureDir} ]; then rm -rf ${allureDir}; fi
+            mkdir -p ${allureDir}
+
+            LANG=es_ES.UTF-8 LANGUAGE=es_ES:es LC_ALL=es_ES.UTF-8 \\
+            ALLURE_RESULTS_DIR=${allureDir} \\
+            npx playwright test --grep '${grepPattern}'
+
+            cp -r ${allureDir}/* allure-results/ 2>/dev/null || true
+        """
+    }
+}

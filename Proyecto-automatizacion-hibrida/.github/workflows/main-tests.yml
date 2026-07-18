@@ -1,0 +1,44 @@
+name: Híbrido API & UI Tests
+
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+
+  schedule:
+    # Ejecutar diariamente a las 8 AM UTC
+    - cron: '0 13 * * *'
+  workflow_dispatch:  # Permite ejecución manual
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+    - uses: actions/checkout@v4
+
+    - name: Setup Node.js
+      uses: actions/setup-node@v4
+      with:
+        node-version: '20'
+        cache: 'npm'
+
+    - name: Install dependencies
+      run: npm install
+
+    - name: Install Playwright Browsers
+      run: npx playwright install --with-deps
+
+    - name: Run API Tests (Newman)
+      run: npm run api:test
+
+    - name: Run UI Tests (Playwright)
+      run: npm run ui:test
+
+    - name: Upload Reports
+      if: always()
+      uses: actions/upload-artifact@v4
+      with:
+        name: test-reports
+        path: reports/

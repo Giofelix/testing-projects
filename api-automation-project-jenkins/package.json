@@ -1,0 +1,22 @@
+{
+  "name": "api-automation-project",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "verify": "node scripts/verify_setup.js",
+    "test": "newman run collections/API_Automation_Project_collection.json -g environments/workspace.postman_globals.json",
+    "test:html": "newman run collections/API_Automation_Project_collection.json -g environments/workspace.postman_globals.json -r htmlextra --reporter-htmlextra-export reports/reporte_visual.html",
+    "test:ci": "newman run collections/API_Automation_Project_collection.json -g environments/workspace.postman_globals.json -r cli,junitfull --reporter-junitfull-export reports/junit.xml",
+    "clean": "del /q reports\\* && echo ✅ Reportes limpiados",
+    "setup": "npm install && npm run verify"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "devDependencies": {
+    "newman": "^6.2.2",
+    "newman-reporter-htmlextra": "^1.23.1",
+    "newman-reporter-junitfull": "^1.1.1"
+  }
+}

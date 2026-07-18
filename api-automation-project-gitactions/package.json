@@ -1,0 +1,15 @@
+{
+  "name": "api-automation-project",
+  "version": "1.0.0",
+  "description": "Proyecto de automatización de APIs con Postman y Newman",
+  "scripts": {
+  "test": "newman run collections/UserManagement.postman_collection.json -g environments/ReqRes_Practice.postman_environment.json",
+  "test:html": "newman run collections/UserManagement.postman_collection.json -g environments/ReqRes_Practice.postman_environment.json -r htmlextra --reporter-htmlextra-export reports/html-report.html",
+  "test:all": "newman run collections/UserManagement.postman_collection.json -g environments/ReqRes_Practice.postman_environment.json -r cli,json,htmlextra,junit --reporter-json-export reports/json-report.json --reporter-htmlextra-export reports/html-report.html --reporter-junit-export reports/junit-report.xml",
+  "run:tests": "node scripts/run_tests.js"
+},
+  "devDependencies": {
+    "newman": "^6.0.0",
+    "newman-reporter-htmlextra": "^1.22.1"
+  }
+}
